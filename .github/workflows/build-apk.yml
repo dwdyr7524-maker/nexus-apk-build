@@ -1,9 +1,9 @@
-name: Build NEXUS AI APK
+name: Build NEXUS AI Release APK
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -60,40 +60,53 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Prepare debug signing key
+      - name: Prepare release signing key
         shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          cd "${{ steps.project.outputs.dir }}"
-          if [ ! -f debug.keystore ]; then
-            keytool -genkeypair -v -keystore debug.keystore -storepass android \
-              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ] || [ -z "${ANDROID_KEY_PASSWORD:-}" ]; then
+            echo "Missing signing secrets. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_PASSWORD in repository Actions secrets."
+            exit 1
           fi
+          cd "${{ steps.project.outputs.dir }}"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
+          keytool -list -keystore my-upload-key.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias upload >/dev/null
+          echo "KEYSTORE_PATH=$PWD/my-upload-key.jks" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
           [ -f .env.example ] || touch .env.example
 
-      - name: Build debug APK
+      - name: Build signed release APK
         run: |
           set -euo pipefail
           cd "${{ steps.project.outputs.dir }}"
-          gradle :app:assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/NEXUS-AI-debug.apk"
-          ls -lh "$GITHUB_WORKSPACE/NEXUS-AI-debug.apk"
+          gradle :app:assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/NEXUS-AI-release.apk"
+          ls -lh "$GITHUB_WORKSPACE/NEXUS-AI-release.apk"
 
-      - name: Upload APK artifact
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          apksigner verify --verbose "$GITHUB_WORKSPACE/NEXUS-AI-release.apk"
+
+      - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NEXUS-AI-debug-apk
-          path: NEXUS-AI-debug.apk
+          name: NEXUS-AI-release-apk
+          path: NEXUS-AI-release.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
-      - name: Publish APK release
+      - name: Publish signed APK release
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-apk
-          name: NEXUS AI - APK להתקנה
-          body: APK שנבנה אוטומטית מתוך קובץ הפרויקט שהועלה למאגר.
-          files: NEXUS-AI-debug.apk
+          name: NEXUS AI - Release APK חתום
+          body: גרסת Release חתומה דיגיטלית של NEXUS AI.
+          files: NEXUS-AI-release.apk
           make_latest: true
