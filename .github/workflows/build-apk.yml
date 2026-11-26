@@ -1,4 +1,4 @@
-name: Build NEXUS AI Release APK
+name: Build and diagnose NEXUS AI APK
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-apk:
@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           PROJECT_DIR="."
-          if [ ! -f "settings.gradle.kts" ]; then
+          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
             ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
             if [ -z "$ZIP_FILE" ]; then
               echo "No Android project ZIP found in repository root."
@@ -29,15 +29,51 @@ jobs:
             fi
             mkdir -p _android_project
             python3 -m zipfile -e "$ZIP_FILE" _android_project
-            SETTINGS_FILE="$(find _android_project -maxdepth 5 -name settings.gradle.kts -print -quit)"
+            SETTINGS_FILE="$(find _android_project -maxdepth 8 \\( -name settings.gradle.kts -o -name settings.gradle \\) -print -quit)"
             if [ -z "$SETTINGS_FILE" ]; then
-              echo "settings.gradle.kts was not found inside the ZIP."
+              echo "No Gradle settings file was found inside the ZIP."
+              find _android_project -maxdepth 5 -type f | head -200
               exit 1
             fi
             PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
           fi
           echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
           echo "Android project directory: $PROJECT_DIR"
+
+      - name: Diagnose Firebase and Android configuration (safe summary only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.project.outputs.dir }}"
+          {
+            echo "=== Project files (first 250) ==="
+            find . -maxdepth 7 -type f \\( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'AndroidManifest.xml' -o -name 'google-services.json' -o -name 'GoogleService-Info.plist' -o -name 'firebase.json' -o -name 'package.json' -o -name '*.kt' -o -name '*.java' -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' \\) | head -250
+            echo "=== Firebase identifiers (no API keys or secrets) ==="
+            python3 - <<'PY'
+          import json, pathlib, re
+          roots=[pathlib.Path('.')]
+          for root in roots:
+              for p in root.rglob('google-services.json'):
+                  try:
+                      d=json.loads(p.read_text(errors='ignore'))
+                      pi=d.get('project_info',{})
+                      print(f"{p}: project_id={pi.get('project_id','NOT_FOUND')}")
+                      for c in d.get('client',[]):
+                          ci=c.get('client_info',{})
+                          ai=ci.get('android_client_info',{})
+                          print(f"  app_id={ci.get('mobilesdk_app_id','NOT_FOUND')} package={ai.get('package_name','NOT_FOUND')}")
+                  except Exception as e: print(f"{p}: parse_error={type(e).__name__}")
+              for p in root.rglob('*'):
+                  if not p.is_file() or p.stat().st_size > 2_000_000: continue
+                  if p.suffix.lower() not in {'.kt','.java','.ts','.tsx','.js','.json','.xml','.gradle','.kts'}: continue
+                  try: s=p.read_text(errors='ignore')
+                  except Exception: continue
+                  for i,line in enumerate(s.splitlines(),1):
+                      if re.search(r'projectId|applicationId|initializeAppCheck|initializeApp\s*\(|AppCheck|PlayIntegrity|PlayIntegrityAppCheckProviderFactory|DebugAppCheckProviderFactory',line,re.I):
+                          safe=re.sub(r'(apiKey|token|secret|password)\s*[:=]\s*["\'][^"\']+["\']',r'\1=[REDACTED]',line,flags=re.I)
+                          print(f"{p}:{i}: {safe[:240]}")
+          PY
+          } | tee "$GITHUB_WORKSPACE/nexus-diagnostic-report.txt"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -60,53 +96,29 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Prepare release signing key
+      - name: Build debug APK (does not need release signing secrets)
+        id: build
         shell: bash
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ] || [ -z "${ANDROID_KEY_PASSWORD:-}" ]; then
-            echo "Missing signing secrets. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_PASSWORD in repository Actions secrets."
-            exit 1
-          fi
-          cd "${{ steps.project.outputs.dir }}"
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
-          keytool -list -keystore my-upload-key.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias upload >/dev/null
-          echo "KEYSTORE_PATH=$PWD/my-upload-key.jks" >> "$GITHUB_ENV"
-          echo "STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
-          [ -f .env.example ] || touch .env.example
-
-      - name: Build signed release APK
         run: |
           set -euo pipefail
           cd "${{ steps.project.outputs.dir }}"
-          gradle :app:assembleRelease --no-daemon
-          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/NEXUS-AI-release.apk"
-          ls -lh "$GITHUB_WORKSPACE/NEXUS-AI-release.apk"
+          gradle :app:assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/NEXUS-AI-debug.apk"
+          ls -lh "$GITHUB_WORKSPACE/NEXUS-AI-debug.apk"
 
-      - name: Verify APK signature
-        run: |
-          set -euo pipefail
-          apksigner verify --verbose "$GITHUB_WORKSPACE/NEXUS-AI-release.apk"
-
-      - name: Upload signed APK artifact
+      - name: Upload debug APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: NEXUS-AI-release-apk
-          path: NEXUS-AI-release.apk
-          if-no-files-found: error
+          name: NEXUS-AI-debug-apk
+          path: NEXUS-AI-debug.apk
           retention-days: 30
 
-      - name: Publish signed APK release
-        if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: latest-apk
-          name: NEXUS AI - Release APK חתום
-          body: גרסת Release חתומה דיגיטלית של NEXUS AI.
-          files: NEXUS-AI-release.apk
-          make_latest: true
+          name: NEXUS-AI-diagnostic-report
+          path: nexus-diagnostic-report.txt
+          if-no-files-found: warn
+          retention-days: 30
