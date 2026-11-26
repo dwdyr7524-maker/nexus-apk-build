@@ -51,27 +51,35 @@ jobs:
             echo "=== Firebase identifiers (no API keys or secrets) ==="
             python3 - <<'PY'
           import json, pathlib, re
-          roots=[pathlib.Path('.')]
-          for root in roots:
-              for p in root.rglob('google-services.json'):
-                  try:
-                      d=json.loads(p.read_text(errors='ignore'))
-                      pi=d.get('project_info',{})
-                      print(f"{p}: project_id={pi.get('project_id','NOT_FOUND')}")
-                      for c in d.get('client',[]):
-                          ci=c.get('client_info',{})
-                          ai=ci.get('android_client_info',{})
-                          print(f"  app_id={ci.get('mobilesdk_app_id','NOT_FOUND')} package={ai.get('package_name','NOT_FOUND')}")
-                  except Exception as e: print(f"{p}: parse_error={type(e).__name__}")
-              for p in root.rglob('*'):
-                  if not p.is_file() or p.stat().st_size > 2_000_000: continue
-                  if p.suffix.lower() not in {'.kt','.java','.ts','.tsx','.js','.json','.xml','.gradle','.kts'}: continue
-                  try: s=p.read_text(errors='ignore')
-                  except Exception: continue
-                  for i,line in enumerate(s.splitlines(),1):
-                      if re.search(r'projectId|applicationId|initializeAppCheck|initializeApp\s*\(|AppCheck|PlayIntegrity|PlayIntegrityAppCheckProviderFactory|DebugAppCheckProviderFactory',line,re.I):
-                          safe=re.sub(r'(apiKey|token|secret|password)\s*[:=]\s*["\'][^"\']+["\']',r'\1=[REDACTED]',line,flags=re.I)
-                          print(f"{p}:{i}: {safe[:240]}")
+          root=pathlib.Path('.')
+          for p in root.rglob('google-services.json'):
+              try:
+                  d=json.loads(p.read_text(errors='ignore'))
+                  pi=d.get('project_info',{})
+                  print(f"{p}: project_id={pi.get('project_id','NOT_FOUND')}")
+                  for c in d.get('client',[]):
+                      ci=c.get('client_info',{})
+                      ai=ci.get('android_client_info',{})
+                      print(f"  app_id={ci.get('mobilesdk_app_id','NOT_FOUND')} package={ai.get('package_name','NOT_FOUND')}")
+              except Exception as e: print(f"{p}: parse_error={type(e).__name__}")
+          print("=== Relevant source files (secrets redacted) ===")
+          targets=[
+              'app/src/main/java/com/example/AppCheckHelper.kt',
+              'app/src/main/java/com/example/MainActivity.kt',
+              'app/src/main/java/com/example/data/ai/FirebaseNexusAiProvider.kt',
+              'app/build.gradle.kts',
+              'app/src/main/AndroidManifest.xml',
+          ]
+          secret=re.compile(r'(?i)(api[_-]?key|secret|password|token|authorization|bearer)(\\s*[:=]\\s*)(["\\']?)[^\\s,"\\']+')
+          for name in targets:
+              p=pathlib.Path(name)
+              if not p.exists():
+                  print(f"--- MISSING: {name} ---")
+                  continue
+              print(f"--- {name} ---")
+              for i,line in enumerate(p.read_text(errors='ignore').splitlines(),1):
+                  line=secret.sub(r'\\1\\2[REDACTED]',line)
+                  print(f"{i}: {line[:500]}")
           PY
           } | tee "$GITHUB_WORKSPACE/nexus-diagnostic-report.txt"
 
@@ -102,7 +110,6 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ steps.project.outputs.dir }}"
-          # This project uses a custom debugConfig that expects debug.keystore at the project root.
           keytool -genkeypair -v \
             -keystore debug.keystore \
             -storepass android \
