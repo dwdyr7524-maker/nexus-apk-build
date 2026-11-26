@@ -70,7 +70,6 @@ jobs:
               'app/build.gradle.kts',
               'app/src/main/AndroidManifest.xml',
           ]
-          secret=re.compile(r'(?i)(api[_-]?key|secret|password|token|authorization|bearer)(\\s*[:=]\\s*)(["\\']?)[^\\s,"\\']+')
           for name in targets:
               p=pathlib.Path(name)
               if not p.exists():
@@ -78,7 +77,8 @@ jobs:
                   continue
               print(f"--- {name} ---")
               for i,line in enumerate(p.read_text(errors='ignore').splitlines(),1):
-                  line=secret.sub(r'\\1\\2[REDACTED]',line)
+                  if any(word in line.lower() for word in ('api_key','apikey','secret','password','token','authorization','bearer')):
+                      line='[REDACTED: sensitive configuration line]'
                   print(f"{i}: {line[:500]}")
           PY
           } | tee "$GITHUB_WORKSPACE/nexus-diagnostic-report.txt"
