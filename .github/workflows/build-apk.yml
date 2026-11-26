@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           PROJECT_DIR="."
-          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
+          if [ ! -f "settings.gradle.kts" ]; then
             ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
             if [ -z "$ZIP_FILE" ]; then
               echo "No Android project ZIP found in repository root."
@@ -29,7 +29,7 @@ jobs:
             fi
             mkdir -p _android_project
             python3 -m zipfile -e "$ZIP_FILE" _android_project
-            SETTINGS_FILE="$(find _android_project -maxdepth 8 \\( -name settings.gradle.kts -o -name settings.gradle \\) -print -quit)"
+            SETTINGS_FILE="$(find _android_project -maxdepth 8 -name settings.gradle.kts -print -quit)"
             if [ -z "$SETTINGS_FILE" ]; then
               echo "No Gradle settings file was found inside the ZIP."
               find _android_project -maxdepth 5 -type f | head -200
